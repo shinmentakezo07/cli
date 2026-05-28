@@ -26,11 +26,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagehistory"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagehistory"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -499,14 +499,19 @@ func main() {
 		log.WithField("dir", historyDir).Info("usage history enabled")
 
 		// TimescaleDB backend (optional).
-		if cfg.UsageHistoryPostgresDSN != "" {
+		// Falls back to PGSTORE_DSN when usage-history-postgres-dsn is not set.
+		pgDSN := cfg.UsageHistoryPostgresDSN
+		if pgDSN == "" {
+			pgDSN = pgStoreDSN
+		}
+		if pgDSN != "" {
 			pgCtx, pgCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			pgStore, errPg := usagehistory.NewPgStore(pgCtx, cfg.UsageHistoryPostgresDSN)
+			pgStore, errPg := usagehistory.NewPgStore(pgCtx, pgDSN)
 			if errPg != nil {
 				pgCancel()
 				log.WithError(errPg).Warn("usagehistory: failed to connect to Postgres, falling back to JSONL only")
 			} else {
-				if errSchema := pgStore.EnsureSchema(pgCtx, cfg.UsageHistoryPostgresDSN); errSchema != nil {
+				if errSchema := pgStore.EnsureSchema(pgCtx, pgDSN); errSchema != nil {
 					pgCancel()
 					log.WithError(errSchema).Warn("usagehistory: failed to ensure schema, falling back to JSONL only")
 					pgStore.Close()
@@ -528,7 +533,7 @@ func main() {
 					w := usagehistory.NewWriter(pgStore, batchSize*10, batchSize, flushInterval)
 					w.Start(context.Background())
 					usagehistory.SetPgWriter(w)
-					log.WithField("dsn", cfg.UsageHistoryPostgresDSN).Info("usage history TimescaleDB backend enabled")
+					log.WithField("dsn", pgDSN).Info("usage history TimescaleDB backend enabled")
 				}
 			}
 		}
