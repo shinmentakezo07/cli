@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPanelGitHubRepository = "https://github.com/shinmentakezo07/webui"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
 )
@@ -73,6 +73,17 @@ type Config struct {
 	// in memory for Management API consumers.
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
+
+	// UsageHistoryEnabled toggles persistent JSONL storage of usage records.
+	UsageHistoryEnabled bool `yaml:"usage-history-enabled" json:"usage-history-enabled"`
+
+	// UsageHistoryDir is the directory where usage history JSONL files are stored.
+	// Default: "usage-history" (relative to working directory).
+	UsageHistoryDir string `yaml:"usage-history-dir" json:"usage-history-dir"`
+
+	// UsageHistoryRetentionDays controls how many days of usage history to keep.
+	// Default: 30. Set to 0 to keep forever.
+	UsageHistoryRetentionDays int `yaml:"usage-history-retention-days" json:"usage-history-retention-days"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -640,6 +651,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.UsageHistoryEnabled = true
+	cfg.UsageHistoryDir = "usage-history"
+	cfg.UsageHistoryRetentionDays = 30
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
