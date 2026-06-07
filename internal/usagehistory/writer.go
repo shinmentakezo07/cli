@@ -42,8 +42,6 @@ type BatchInserter interface {
 	InsertBatch(ctx context.Context, records []PgRecord) error
 }
 
-const maxQueuedRecords = 100000
-
 // Writer buffers usage records and flushes them to a PgStore in batches.
 // It avoids producer-side drops under normal load: the buffer grows until the
 // Postgres backlog cap is reached, and Write succeeds until the writer is
@@ -122,13 +120,6 @@ func (w *Writer) Write(r PgRecord) bool {
 		return false
 	}
 	w.queue = append(w.queue, r)
-	if len(w.queue) > maxQueuedRecords {
-		w.queue[0] = PgRecord{}
-		w.queue = w.queue[1:]
-		metricsRecordsDropped.Inc()
-		MarkPgDegraded()
-		log.WithField("max_queue", maxQueuedRecords).Warn("usagehistory: postgres writer queue full; marked postgres history degraded and dropped oldest backlog record")
-	}
 	w.mu.Unlock()
 
 	// Non-blocking wake-up signal. The run goroutine may already be busy
