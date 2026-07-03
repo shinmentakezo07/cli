@@ -39,8 +39,20 @@ go test ./internal/runtime/executor -run Claude           # executor-specific
 go build ./examples/...
 ```
 
+## Management Web UI (webui)
+
+The control panel served at `GET /management.html` is a React/Vite single-file app under `webui/`. The built bundle is embedded into the Go binary at compile time via `//go:embed` in `internal/managementasset/embed.go` (the embedded file is `internal/managementasset/management.html`), so the binary serves the UI with no external files. A runtime override at `static/management.html` takes precedence if present.
+
+When you change anything under `webui/`, you must rebuild the web UI and refresh the embedded copy, then rebuild the binary so the new bundle is baked in:
+
+```bash
+(cd webui && npm install --no-audit --no-fund && npm run build) && cp webui/dist/index.html internal/managementasset/management.html && go build -o cli-proxy-api ./cmd/server
+```
+
+You only need to re-run `npm install` when `webui/package.json` dependencies change; otherwise `npm run build` alone is sufficient.
+
 Notable env vars picked up by `cmd/server/main.go` (in addition to flags):
-`DEPLOY=cloud`, `HOME_JWT` (control-plane bootstrap), `PGSTORE_*` (Postgres-backed token store), `GITSTORE_*` (Git-backed token store), `OBJECTSTORE_*` (S3-compatible object store), `USAGE_HISTORY_POSTGRES_ENABLED` (TimescaleDB writer toggle).
+`DEPLOY=cloud`, `HOME_JWT` (control-plane bootstrap), `PGSTORE_*` (Postgres-backed token store), `GITSTORE_*` (Git-backed token store), `OBJECTSTORE_*` (S3-compatible object store), `SQLITESTORE_ENABLED`/`SQLITESTORE_PATH` (SQLite-backed token/config store, writes to `usg.db`), `USAGE_HISTORY_POSTGRES_ENABLED` (TimescaleDB writer toggle), `USAGE_HISTORY_SQLITE_ENABLED`/`usage-history-sqlite-enabled` (SQLite usage-history archive to `usg.db`, replacing JSONL when on).
 
 ## High-Level Architecture
 
@@ -87,7 +99,7 @@ Provider-agnostic reasoning-effort handling, used by all executors:
 
 - `sdk/cliproxy/auth` contains the **runtime** `Manager` used for execution: it picks a credential, calls an executor, and refreshes tokens. Selectors live here too (`RoundRobinSelector`, `FillFirstSelector`, `SessionAffinitySelector`).
 - `internal/auth/{claude,codex,gemini,antigravity,vertex,kimi,xai}` holds the per-provider auth JSON loaders/serializers.
-- `internal/store` has three swappable token-store backends wired by `main.go` based on env: `FileTokenStore` (default), `PostgresStore`, `GitTokenStore`, `ObjectTokenStore` (S3-compatible). `sdkAuth.RegisterTokenStore(...)` in `main.go` is what makes the chosen store visible to the rest of the system.
+- `internal/store` has four swappable token-store backends wired by `main.go` based on env: `FileTokenStore` (default), `PostgresStore`, `SqliteTokenStore` (`internal/store/sqlitestore.go`, cgo-free via `modernc.org/sqlite`, persists to `usg.db` and co-shares that file with the usage-history SQLite backend when both are on), `GitTokenStore`, `ObjectTokenStore` (S3-compatible). `sdkAuth.RegisterTokenStore(...)` in `main.go` is what makes the chosen store visible to the rest of the system.
 
 ### Watcher / hot reload (`internal/watcher`)
 
@@ -95,7 +107,13 @@ Provider-agnostic reasoning-effort handling, used by all executors:
 
 ### Usage history (`internal/usagehistory`)
 
-Optional local persistence for usage records. Two writers can be active at once: a JSONL file writer (`store.go`, `compaction.go`, daily rotation) and a TimescaleDB/Postgres writer (`pgstore.go`, `writer.go`). The Postgres writer is the unbounded-queue variant; the recent commits (`1f64da46`, `bc342b17`) replaced a bounded channel that was silently dropping records.
+Optional local persistence for usage records. Three sinks, selectable by config:
+
+- A JSONL file writer (`store.go`, `compaction.go`, daily rotation) — the default.
+- A TimescaleDB/Postgres writer (`pgstore.go`, `writer.go`), opt-in via `USAGE_HISTORY_POSTGRES_ENABLED`. The Postgres writer is the unbounded-queue variant; the recent commits (`1f64da46`, `bc342b17`) replaced a bounded channel that was silently dropping records.
+- A SQLite archive (`sqlitestore.go`), opt-in via `usage-history-sqlite-enabled` in config or the `USAGE_HISTORY_SQLITE_ENABLED` env override, persisted to `usg.db` (path via `usage-history-sqlite-path`, default `<writableBase>/usg.db`). When enabled, SQLite **replaces** the JSONL writer (`usg.db` becomes the sole durable usage store; the JSONL rotation is skipped entirely). `SqliteStore` mirrors `PgStore` column-for-column (see `migrations/001_create_usage_records.sql`) and is driven by the same shared async `Writer` behind the `HistoryStore` interface, so an optional parallel Postgres writer still fans out alongside it if configured.
+
+The Postgres and SQLite writers each carry an independent "degraded" flag: if a flush exhausts retries, that backend is marked degraded and the management history query falls back to whatever sink still has complete data, so an unreachable Postgres/SQLite never silently serves an incomplete record set.
 
 ### Management & misc
 
