@@ -103,6 +103,17 @@ type Config struct {
 	// Default: "5s". Ensures records are written even under low traffic.
 	UsageHistoryFlushInterval string `yaml:"usage-history-flush-interval" json:"usage-history-flush-interval"`
 
+	// UsageHistorySqliteEnabled toggles the embedded SQLite backend for usage
+	// history. When true, every usage record is stored durably in a local usg.db
+	// file instead of the rolling usage-*.jsonl files (JSONL is replaced).
+	// Default: false (opt-in).
+	UsageHistorySqliteEnabled bool `yaml:"usage-history-sqlite-enabled" json:"usage-history-sqlite-enabled"`
+
+	// UsageHistorySqlitePath is the path to the SQLite database file for usage
+	// history. When empty, main.go resolves it to "<writableBase>/usg.db" so it
+	// shares the same usg.db as the token store when both are enabled.
+	UsageHistorySqlitePath string `yaml:"usage-history-sqlite-path" json:"usage-history-sqlite-path"`
+
 	// PrometheusMetricsEnabled enables the /metrics endpoint with Prometheus counters.
 	PrometheusMetricsEnabled bool `yaml:"prometheus-metrics-enabled" json:"prometheus-metrics-enabled"`
 
@@ -676,6 +687,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageHistoryPostgresEnabled = true
 	cfg.UsageHistoryDir = "usage-history"
 	cfg.UsageHistoryRetentionDays = 30
+	cfg.UsageHistorySqliteEnabled = false
 	cfg.PrometheusMetricsEnabled = true
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff

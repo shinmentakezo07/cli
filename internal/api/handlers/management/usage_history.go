@@ -46,7 +46,32 @@ func (h *Handler) GetUsageHistory(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"records": records, "source": "postgres"})
 			return
 		}
-		// Fall through to JSONL on error.
+		// Fall through to SQLite / JSONL on error.
+	}
+	if usagehistory.HasSqliteStore() {
+		// Embedded SQLite backend (usg.db) — the durable store when
+		// usage-history-sqlite-enabled is on (in which case JSONL is skipped).
+		since := time.Now().AddDate(0, 0, -days)
+		records, err := usagehistory.SqliteQueryHistory(c.Request.Context(), since, limit)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{"records": records, "source": "sqlite"})
+			return
+		}
+		// Fall through to degraded-query / JSONL on error.
+	} else if usagehistory.SqliteConfigured() {
+		// Degraded: the async writer's last flush exhausted retries, so the most
+		// recent records may be missing. Every committed row is still readable
+		// from usg.db, though, and serving them with a "degraded" flag is strictly
+		// more useful than falling through to the JSONL fallback — which is empty
+		// once SQLite replaces JSONL as the durable store.
+		since := time.Now().AddDate(0, 0, -days)
+		records, err := usagehistory.SqliteQueryHistory(c.Request.Context(), since, limit)
+		body := gin.H{"records": []interface{}{}, "source": "sqlite", "degraded": true}
+		if err == nil {
+			body["records"] = records
+		}
+		c.JSON(http.StatusOK, body)
+		return
 	}
 
 	// Fallback: read from JSONL files.

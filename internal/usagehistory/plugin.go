@@ -19,6 +19,9 @@ var (
 	pgDegraded atomic.Bool
 	store      *Store  // existing JSONL store
 	pgWriter   *Writer // async TimescaleDB writer (nil when Postgres not configured)
+
+	sqliteDegraded atomic.Bool
+	sqliteWriter   *Writer // async SQLite writer (nil when SQLite not configured)
 )
 
 func init() {
@@ -54,6 +57,9 @@ func CloseStore() {
 func SetPgWriter(w *Writer) {
 	pgWriter = w
 	pgDegraded.Store(false)
+	if w != nil {
+		w.SetDegradeHook(MarkPgDegraded)
+	}
 }
 
 // StopPgWriter stops the async TimescaleDB writer, flushing remaining records.
@@ -87,6 +93,56 @@ func QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecor
 	return pgWriter.store.QueryHistory(ctx, since, limit)
 }
 
+// SetSqliteWriter sets the async SQLite writer. Must be called before any usage records are processed.
+func SetSqliteWriter(w *Writer) {
+	sqliteWriter = w
+	sqliteDegraded.Store(false)
+	if w != nil {
+		w.SetDegradeHook(MarkSqliteDegraded)
+	}
+}
+
+// StopSqliteWriter stops the async SQLite writer, flushing remaining records.
+func StopSqliteWriter() {
+	if sqliteWriter != nil {
+		sqliteWriter.Stop()
+	}
+}
+
+// MarkSqliteDegraded forces management history queries to fall back because the
+// SQLite backlog is known to be incomplete.
+func MarkSqliteDegraded() {
+	sqliteDegraded.Store(true)
+}
+
+func SqliteDegraded() bool {
+	return sqliteDegraded.Load()
+}
+
+// HasSqliteStore returns true if the SQLite backend is available and healthy
+// (not degraded). Use SqliteConfigured for the degraded-tolerant variant.
+func HasSqliteStore() bool {
+	return !SqliteDegraded() && SqliteConfigured()
+}
+
+// SqliteConfigured returns true if the SQLite backend is present, regardless of
+// whether its async writer is currently degraded. Committed rows remain
+// queryable from usg.db even when degraded — only the latest unflushed batch is
+// at risk — so the management handler serves them with a "degraded" annotation
+// rather than falling through to an empty JSONL store.
+func SqliteConfigured() bool {
+	return sqliteWriter != nil && sqliteWriter.store != nil
+}
+
+// SqliteQueryHistory queries the SQLite store for historical records.
+// Returns an error if the SQLite store is not initialized.
+func SqliteQueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecord, error) {
+	if sqliteWriter == nil || sqliteWriter.store == nil {
+		return nil, fmt.Errorf("usagehistory: sqlite store not initialized")
+	}
+	return sqliteWriter.store.QueryHistory(ctx, since, limit)
+}
+
 func usageEventID(record coreusage.Record, endpoint, requestID string) string {
 	parts := []string{
 		strings.TrimSpace(record.Provider),
@@ -104,11 +160,16 @@ func usageEventID(record coreusage.Record, endpoint, requestID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-
 type historyPlugin struct{}
 
 func (p *historyPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
-	if p == nil || !Enabled() || store == nil {
+	if p == nil || !Enabled() {
+		return
+	}
+	// Nothing to do if no durable sink is configured. When the SQLite backend is
+	// enabled the JSONL store is intentionally left uninitialized, so store may
+	// be nil — that is valid as long as the SQLite writer is present.
+	if store == nil && sqliteWriter == nil {
 		return
 	}
 
@@ -175,6 +236,20 @@ func (p *historyPlugin) HandleUsage(ctx context.Context, record coreusage.Record
 		},
 	}
 
+	// SQLite backend replaces JSONL when enabled: usg.db is the durable store.
+	// The Postgres parallel writer (if also configured) stays independent.
+	if sqliteWriter != nil {
+		pgRec := fromJSONLRecord(&rec)
+		sqliteWriter.Write(pgRec)
+		if pgWriter != nil {
+			pgWriter.Write(pgRec)
+		}
+		return
+	}
+
+	if store == nil {
+		return
+	}
 	if err := store.Write(rec); err != nil {
 		log.WithError(err).Warn("usagehistory: failed to write record")
 		return

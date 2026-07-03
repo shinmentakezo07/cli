@@ -42,16 +42,25 @@ type BatchInserter interface {
 	InsertBatch(ctx context.Context, records []PgRecord) error
 }
 
-// Writer buffers usage records and flushes them to a PgStore in batches.
+// HistoryStore is the contract a backing store must satisfy to be driven by the
+// shared async Writer and queried by the management API. Both *PgStore and
+// *SqliteStore implement it. Defining it as an interface lets Writer serve any
+// SQL backend without taking a direct dependency on a specific store type.
+type HistoryStore interface {
+	BatchInserter
+	QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecord, error)
+}
+
+// Writer buffers usage records and flushes them to a store in batches.
 // It avoids producer-side drops under normal load: the buffer grows until the
 // Postgres backlog cap is reached, and Write succeeds until the writer is
 // closed. If Postgres remains unavailable past the cap, the writer drops the
 // oldest Postgres backlog entries; the JSONL history sink has already persisted
 // those records before they reach this writer.
 type Writer struct {
-	// store is the concrete *PgStore used by the management API for queries.
+	// store is the backing HistoryStore used by the management API for queries.
 	// It is also the default BatchInserter; tests may override via SetInserter.
-	store         *PgStore
+	store         HistoryStore
 	inserter      BatchInserter
 	mu            sync.Mutex
 	queue         []PgRecord
@@ -63,6 +72,12 @@ type Writer struct {
 	done   chan struct{}
 	stopMu sync.Mutex
 	wg     sync.WaitGroup
+
+	// degrade is invoked once when a final flush fails after all retries, so the
+	// owning plugin can mark its specific backend degraded. It is set via
+	// SetDegradeHook — pg callers pass MarkPgDegraded, sqlite callers pass
+	// MarkSqliteDegraded — keeping the shared Writer backend-agnostic.
+	degrade func()
 }
 
 // NewWriter creates a Writer that buffers records and flushes to store.
@@ -73,7 +88,7 @@ type Writer struct {
 // bufferSize is retained for backward compatibility with the previous
 // bounded-channel implementation; it is no longer used as a hard cap. The
 // flush batch size still governs when records are sent to the store.
-func NewWriter(store *PgStore, bufferSize, batchSize int, flushInterval time.Duration) *Writer {
+func NewWriter(store HistoryStore, bufferSize, batchSize int, flushInterval time.Duration) *Writer {
 	w := &Writer{
 		store:         store,
 		inserter:      store,
@@ -98,6 +113,16 @@ func (w *Writer) SetInserter(b BatchInserter) {
 		return
 	}
 	w.inserter = b
+}
+
+// SetDegradeHook sets the function invoked when a final flush fails after all
+// retries. pg callers pass MarkPgDegraded; sqlite callers pass MarkSqliteDegraded.
+// Must be called before Start.
+func (w *Writer) SetDegradeHook(f func()) {
+	if w == nil {
+		return
+	}
+	w.degrade = f
 }
 
 // Start launches the background flush goroutine.
@@ -217,8 +242,10 @@ func (w *Writer) flushFinal(batch []PgRecord, reason string) {
 			time.Sleep(delay)
 		}
 	}
-	MarkPgDegraded()
-	log.WithField("count", len(batch)).WithField("reason", reason).Error("usagehistory: failed final postgres flush after retries; marked postgres history degraded")
+	if w.degrade != nil {
+		w.degrade()
+	}
+	log.WithField("count", len(batch)).WithField("reason", reason).Error("usagehistory: failed final flush after retries; marked history backend degraded")
 }
 
 func (w *Writer) run(ctx context.Context) {

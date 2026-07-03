@@ -141,6 +141,9 @@ func main() {
 		pgStoreSchema        string
 		pgStoreLocalPath     string
 		pgStoreInst          *store.PostgresStore
+		useSqliteTokenStore  bool
+		sqliteStorePath      string
+		sqliteStoreInst      *store.SqliteTokenStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
 		gitStoreUser         string
@@ -208,6 +211,15 @@ func main() {
 			}
 		}
 		useGitStore = false
+	}
+	if value, ok := lookupEnv("SQLITESTORE_ENABLED", "sqlitestore_enabled"); ok {
+		lv := strings.ToLower(strings.TrimSpace(value))
+		if lv == "true" || lv == "1" || lv == "yes" || lv == "on" {
+			useSqliteTokenStore = true
+		}
+	}
+	if value, ok := lookupEnv("SQLITESTORE_PATH", "sqlitestore_path"); ok {
+		sqliteStorePath = value
 	}
 	if value, ok := lookupEnv("GITSTORE_GIT_URL", "gitstore_git_url"); ok {
 		useGitStore = true
@@ -300,6 +312,7 @@ func main() {
 		usePostgresStore = false
 		useObjectStore = false
 		useGitStore = false
+		useSqliteTokenStore = false
 	} else if usePostgresStore {
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
@@ -441,6 +454,41 @@ func main() {
 			cfg.AuthDir = gitStoreInst.AuthDir()
 			log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
 		}
+	} else if useSqliteTokenStore {
+		// SQLite-backed token store: persists config and auth tokens in a local
+		// usg.db file, mirroring the Postgres backend without an external database.
+		base := writableBase
+		if base == "" {
+			base = wd
+		}
+		if sqliteStorePath == "" {
+			sqliteStorePath = filepath.Join(base, "usg.db")
+		}
+		sqliteSpoolDir := filepath.Join(base, "sqlitestore")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		sqliteStoreInst, err = store.NewSqliteTokenStore(ctx, store.SQLiteStoreConfig{
+			Path:     sqliteStorePath,
+			SpoolDir: sqliteSpoolDir,
+		})
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize sqlite token store: %v", err)
+			return
+		}
+		examplePath := filepath.Join(wd, "config.example.yaml")
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if errBootstrap := sqliteStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+			cancel()
+			log.Errorf("failed to bootstrap sqlite-backed config: %v", errBootstrap)
+			return
+		}
+		cancel()
+		configFilePath = sqliteStoreInst.ConfigPath()
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		if err == nil {
+			cfg.AuthDir = sqliteStoreInst.AuthDir()
+			log.Infof("sqlite-backed token store enabled, database path: %s", sqliteStorePath)
+		}
 	} else if configPath != "" {
 		configFilePath = configPath
 		cfg, err = config.LoadConfigOptional(configPath, isCloudDeploy)
@@ -488,15 +536,84 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 
+	// sqliteStoreCleanup closes the SQLite store (stopping its retention sweeper
+	// and releasing the handle). Set only when the SQLite usage-history backend
+	// starts successfully; deferred below so it runs after the writer flushes.
+	var sqliteStoreCleanup func()
+
 	if cfg.UsageHistoryEnabled {
 		historyDir := cfg.UsageHistoryDir
 		if historyDir == "" {
 			historyDir = "usage-history"
 		}
-		usagehistory.InitStore(historyDir)
 		usagehistory.SetEnabled(true)
-		usagehistory.Compact(historyDir, cfg.UsageHistoryRetentionDays)
-		log.WithField("dir", historyDir).Info("usage history enabled")
+
+		// Allow env var to override usage-history-sqlite-enabled from config.
+		// Any non-falsy value enables it (parity with the Postgres toggle);
+		// only "false"/"0"/"no"/"off" disable it.
+		if value, ok := lookupEnv("USAGE_HISTORY_SQLITE_ENABLED", "usage_history_sqlite_enabled"); ok {
+			lv := strings.ToLower(strings.TrimSpace(value))
+			if lv == "false" || lv == "0" || lv == "no" || lv == "off" {
+				cfg.UsageHistorySqliteEnabled = false
+			} else {
+				cfg.UsageHistorySqliteEnabled = true
+			}
+		}
+
+		// SQLite backend replaces the rolling JSONL files when enabled: usg.db is
+		// the sole durable usage store. If it fails to start we fall back to JSONL.
+		sqliteStarted := false
+		if cfg.UsageHistorySqliteEnabled {
+			base := writableBase
+			if base == "" {
+				base = wd
+			}
+			sqliteDBPath := strings.TrimSpace(cfg.UsageHistorySqlitePath)
+			if sqliteDBPath == "" {
+				sqliteDBPath = filepath.Join(base, "usg.db")
+			}
+			sqlCtx, sqlCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			sqliteStore, errSqlite := usagehistory.NewSqliteStore(sqlCtx, sqliteDBPath)
+			if errSqlite != nil {
+				sqlCancel()
+				log.WithError(errSqlite).Warn("usagehistory: failed to open sqlite store, falling back to JSONL")
+			} else if errSchema := sqliteStore.EnsureSchema(sqlCtx); errSchema != nil {
+				sqlCancel()
+				log.WithError(errSchema).Warn("usagehistory: failed to ensure sqlite schema, falling back to JSONL")
+				sqliteStore.Close()
+			} else {
+				if errRet := sqliteStore.SetRetentionPolicy(sqlCtx, cfg.UsageHistoryRetentionDays); errRet != nil {
+					log.WithError(errRet).Warn("usagehistory: failed to set sqlite retention policy")
+				}
+				sqlCancel()
+				batchSize := cfg.UsageHistoryBatchSize
+				if batchSize <= 0 {
+					batchSize = 100
+				}
+				flushInterval := 5 * time.Second
+				if cfg.UsageHistoryFlushInterval != "" {
+					if parsed, errParse := time.ParseDuration(cfg.UsageHistoryFlushInterval); errParse == nil {
+						flushInterval = parsed
+					}
+				}
+				w := usagehistory.NewWriter(sqliteStore, batchSize*10, batchSize, flushInterval)
+				w.Start(context.Background())
+				usagehistory.SetSqliteWriter(w)
+				// Trim usg.db periodically: SQLite has no TimescaleDB-style
+				// automatic chunk drop, so without this the file only shrinks
+				// at startup. A daily sweep is enough at default retention.
+				sqliteStore.StartRetentionSweeper(context.Background(), cfg.UsageHistoryRetentionDays, 24*time.Hour)
+				sqliteStoreCleanup = sqliteStore.Close
+				log.WithField("path", sqliteDBPath).Info("usage history sqlite backend enabled (replaces JSONL)")
+				sqliteStarted = true
+			}
+		}
+
+		if !sqliteStarted {
+			usagehistory.InitStore(historyDir)
+			usagehistory.Compact(historyDir, cfg.UsageHistoryRetentionDays)
+			log.WithField("dir", historyDir).Info("usage history enabled")
+		}
 
 		// TimescaleDB backend (optional).
 		// Falls back to PGSTORE_DSN when usage-history-postgres-dsn is not set.
@@ -550,8 +667,20 @@ func main() {
 		}
 	}
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	// Ensure TimescaleDB writer is flushed on shutdown.
+	// Ensure usage-history writers are flushed on shutdown. Defer runs LIFO, so
+	// the registration order below is: pg writer, sqlite store close, sqlite
+	// writer — which executes as: sqlite writer flush -> sqlite store close -> pg writer flush.
+	// The SQLite store must close AFTER its writer flushes the final batch.
+	// sqliteStoreCleanup stays nil if the SQLite backend never started (usage
+	// history disabled or the store failed to open); nil-guard it so the defer
+	// is a harmless no-op in that case.
 	defer usagehistory.StopPgWriter()
+	defer func() {
+		if sqliteStoreCleanup != nil {
+			sqliteStoreCleanup()
+		}
+	}()
+	defer usagehistory.StopSqliteWriter()
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -584,6 +713,8 @@ func main() {
 		sdkAuth.RegisterTokenStore(objectStoreInst)
 	} else if useGitStore {
 		sdkAuth.RegisterTokenStore(gitStoreInst)
+	} else if useSqliteTokenStore {
+		sdkAuth.RegisterTokenStore(sqliteStoreInst)
 	} else {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	}
