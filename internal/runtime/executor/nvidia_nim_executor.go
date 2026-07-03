@@ -768,6 +768,9 @@ func (e *NvidiaNimExecutor) sendNimRequest(
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	if toolAliases := nimToolArgumentAliasesFromBody(bodyMap); toolAliases != nil {
+		out = restoreNimToolAliasesNonStream(out, toolAliases)
+	}
 	*resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return upstreamBodyMap, nil
 }
