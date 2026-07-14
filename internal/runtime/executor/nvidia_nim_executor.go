@@ -391,35 +391,16 @@ func bodyWithoutNimToolArgumentAliases(body map[string]any) map[string]any {
 // rejected by NIM with "thinking.type must be enabled or disabled". NIM-specific
 // reasoning budget lives in chat_template_kwargs.reasoning_budget, so budget_tokens
 // is stripped from the thinking object.
-func sanitizeNimThinking(body map[string]any, thinkingEnabled bool) {
-	raw, hasThinking := body["thinking"]
-	if !hasThinking {
-		// No thinking field in the request; nothing to coerce. NIM-specific
-		// enable/disable is driven entirely by chat_template_kwargs.
-		return
-	}
 
-	desiredType := "disabled"
-	if thinkingEnabled {
-		desiredType = "enabled"
-	}
 
-	if existing, ok := raw.(map[string]any); ok {
-		// Preserve the object shape but force the type + drop unsupported siblings.
-		existing["type"] = desiredType
-		delete(existing, "budget_tokens")
-		delete(existing, "reasoning_budget")
-		body["thinking"] = existing
-		return
-	}
-
-	// Non-object thinking value: replace with the canonical NIM shape.
-	body["thinking"] = map[string]any{"type": desiredType}
-}
-
-func applyNimRequestOptions(body map[string]any, thinkingEnabled bool) {
+func applyNimRequestOptions(body map[string]any) {
 	sanitizeNimToolSchemas(body)
-	sanitizeNimThinking(body, thinkingEnabled)
+
+	// NVIDIA NIM only supports the simple chat_template_kwargs.enable_thinking
+	// toggle for reasoning. Strip any client-provided reasoning configuration
+	// that would otherwise be passed through to the OpenAI-compatible endpoint.
+	delete(body, "reasoning_effort")
+	delete(body, "thinking")
 
 	maxTokens := defaultNimMaxTokens
 	if v, ok := body["max_tokens"].(float64); ok && v > 0 {
@@ -443,25 +424,20 @@ func applyNimRequestOptions(body map[string]any, thinkingEnabled bool) {
 		}
 	}
 
-	// Always inject the NIM baseline chat_template_kwargs. By default NVIDIA NIM
-	// providers run with enable_thinking=true and clear_thinking=false so reasoning
-	// content is produced and retained for every request, regardless of whether the
-	// caller passed an explicit thinking suffix. When thinking is additionally
-	// enabled via a model suffix, the "thinking" flag and reasoning_budget are
-	// layered on top.
+	// Always inject the NIM baseline chat_template_kwargs. NVIDIA NIM providers
+	// run with enable_thinking=true and clear_thinking=false so reasoning content
+	// is produced and retained for every request, regardless of whether the caller
+	// passed an explicit thinking suffix or reasoning_effort.
 	ctk, ok := extraBody["chat_template_kwargs"].(map[string]any)
 	if !ok {
 		ctk = make(map[string]any)
 		extraBody["chat_template_kwargs"] = ctk
 	}
+	// Enforce the simple NIM thinking payload: only enable_thinking/clear_thinking.
+	delete(ctk, "thinking")
+	delete(ctk, "reasoning_budget")
 	ctk["enable_thinking"] = true
 	ctk["clear_thinking"] = false
-	if thinkingEnabled {
-		ctk["thinking"] = true
-		if _, exists := ctk["reasoning_budget"]; !exists {
-			ctk["reasoning_budget"] = maxTokens
-		}
-	}
 
 	setExtra(extraBody, "top_k", -1, -1)
 	setExtra(extraBody, "min_p", 0.0, 0.0)
@@ -640,12 +616,11 @@ func (e *NvidiaNimExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 	}
 
-	thinkingEnabled := isThinkingEnabled(req.Model)
 	bodyMap, err := unmarshalNimBody(translated)
 	if err != nil {
 		return resp, fmt.Errorf("nvidia nim executor: unmarshal translated body: %w", err)
 	}
-	applyNimRequestOptions(bodyMap, thinkingEnabled)
+	applyNimRequestOptions(bodyMap)
 
 	var upstreamBodyMap map[string]any
 	upstreamBodyMap, err = e.sendNimRequest(ctx, auth, baseURL, apiKey, endpoint, bodyMap, reporter, &resp, to, from, req, opts)
@@ -661,18 +636,6 @@ func (e *NvidiaNimExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	_ = upstreamBodyMap
 	return resp, nil
-}
-
-func isThinkingEnabled(model string) bool {
-	suffix := thinking.ParseSuffix(model)
-	if !suffix.HasSuffix {
-		return false
-	}
-	raw := strings.ToLower(strings.TrimSpace(suffix.RawSuffix))
-	if raw == "none" || raw == "0" || raw == "" {
-		return false
-	}
-	return true
 }
 
 func unmarshalNimBody(data []byte) (map[string]any, error) {
@@ -831,12 +794,11 @@ func (e *NvidiaNimExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
-	thinkingEnabled := isThinkingEnabled(req.Model)
 	bodyMap, err := unmarshalNimBody(translated)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia nim executor: unmarshal translated body: %w", err)
 	}
-	applyNimRequestOptions(bodyMap, thinkingEnabled)
+	applyNimRequestOptions(bodyMap)
 
 	result, err := e.sendNimStream(ctx, auth, baseURL, apiKey, bodyMap, reporter, to, from, req, opts)
 	if err != nil {

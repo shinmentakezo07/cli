@@ -123,7 +123,7 @@ func TestBodyWithoutNimToolArgumentAliases_FlattensExtraBody(t *testing.T) {
 
 func TestApplyNimRequestOptions_Defaults(t *testing.T) {
 	body := map[string]any{"messages": []any{}}
-	applyNimRequestOptions(body, true)
+	applyNimRequestOptions(body)
 
 	assert.Equal(t, 1.0, body["temperature"])
 	assert.Equal(t, 1.0, body["top_p"])
@@ -132,29 +132,49 @@ func TestApplyNimRequestOptions_Defaults(t *testing.T) {
 
 	extra := body["extra_body"].(map[string]any)
 	ctk := extra["chat_template_kwargs"].(map[string]any)
-	assert.Equal(t, true, ctk["thinking"])
 	assert.Equal(t, true, ctk["enable_thinking"])
 	assert.Equal(t, false, ctk["clear_thinking"])
-	assert.Equal(t, defaultNimMaxTokens, ctk["reasoning_budget"])
-}
-
-func TestApplyNimRequestOptions_DefaultBaselineWhenThinkingDisabled(t *testing.T) {
-	body := map[string]any{"messages": []any{}}
-	applyNimRequestOptions(body, false)
-
-	extra := body["extra_body"].(map[string]any)
-	ctk := extra["chat_template_kwargs"].(map[string]any)
-	// Baseline chat_template_kwargs are always injected.
-	assert.Equal(t, true, ctk["enable_thinking"])
-	assert.Equal(t, false, ctk["clear_thinking"])
-	// thinking flag and reasoning_budget are only set when thinking is enabled.
 	assert.Nil(t, ctk["thinking"])
 	assert.Nil(t, ctk["reasoning_budget"])
 }
 
+func TestApplyNimRequestOptions_StripsReasoningEffort(t *testing.T) {
+	body := map[string]any{
+		"messages":       []any{},
+		"reasoning_effort": "high",
+	}
+	applyNimRequestOptions(body)
+
+	assert.Nil(t, body["reasoning_effort"])
+	extra := body["extra_body"].(map[string]any)
+	ctk := extra["chat_template_kwargs"].(map[string]any)
+	assert.Equal(t, true, ctk["enable_thinking"])
+	assert.Equal(t, false, ctk["clear_thinking"])
+}
+
+func TestApplyNimRequestOptions_StripsChatTemplateReasoningKeys(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{},
+		"extra_body": map[string]any{
+			"chat_template_kwargs": map[string]any{
+				"thinking":         true,
+				"reasoning_budget": 4096,
+			},
+		},
+	}
+	applyNimRequestOptions(body)
+
+	extra := body["extra_body"].(map[string]any)
+	ctk := extra["chat_template_kwargs"].(map[string]any)
+	assert.Nil(t, ctk["thinking"])
+	assert.Nil(t, ctk["reasoning_budget"])
+	assert.Equal(t, true, ctk["enable_thinking"])
+	assert.Equal(t, false, ctk["clear_thinking"])
+}
+
 func TestApplyNimRequestOptions_PreservesExistingMaxTokens(t *testing.T) {
 	body := map[string]any{"max_tokens": 2048}
-	applyNimRequestOptions(body, false)
+	applyNimRequestOptions(body)
 	assert.Equal(t, 2048, body["max_tokens"])
 }
 
@@ -202,54 +222,21 @@ func TestCloneBodyWithoutReasoningContent(t *testing.T) {
 	assert.Nil(t, msgs[1].(map[string]any)["reasoning_content"])
 }
 
-func TestSanitizeNimThinking_CoercesAdaptiveToEnabled(t *testing.T) {
+func TestApplyNimRequestOptions_StripsTopLevelThinking(t *testing.T) {
 	body := map[string]any{
+		"messages": []any{},
 		"thinking": map[string]any{
 			"type":          "adaptive",
 			"budget_tokens": 4096,
 		},
 	}
-	sanitizeNimThinking(body, true)
-	thinking, ok := body["thinking"].(map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, "enabled", thinking["type"])
-	assert.Nil(t, thinking["budget_tokens"])
-}
-
-func TestSanitizeNimThinking_CoercesAutoToDisabled(t *testing.T) {
-	body := map[string]any{
-		"thinking": map[string]any{"type": "auto"},
-	}
-	sanitizeNimThinking(body, false)
-	thinking, ok := body["thinking"].(map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, "disabled", thinking["type"])
-}
-
-func TestSanitizeNimThinking_NoThinkingFieldIsNoOp(t *testing.T) {
-	body := map[string]any{"messages": []any{}}
-	sanitizeNimThinking(body, true)
-	_, ok := body["thinking"]
+	applyNimRequestOptions(body)
+	_, ok := body["thinking"].(map[string]any)
 	assert.False(t, ok)
-}
-
-func TestSanitizeNimThinking_ReplacesNonObjectValue(t *testing.T) {
-	body := map[string]any{"thinking": "true"}
-	sanitizeNimThinking(body, true)
-	thinking, ok := body["thinking"].(map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, "enabled", thinking["type"])
-}
-
-func TestSanitizeNimThinking_PreservesEnabledType(t *testing.T) {
-	body := map[string]any{
-		"thinking": map[string]any{"type": "enabled", "budget_tokens": 8192},
-	}
-	sanitizeNimThinking(body, true)
-	thinking, ok := body["thinking"].(map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, "enabled", thinking["type"])
-	assert.Nil(t, thinking["budget_tokens"])
+	extra := body["extra_body"].(map[string]any)
+	ctk := extra["chat_template_kwargs"].(map[string]any)
+	assert.Equal(t, true, ctk["enable_thinking"])
+	assert.Equal(t, false, ctk["clear_thinking"])
 }
 
 func TestSetExtra_SkipsExistingAndDefaultValues(t *testing.T) {

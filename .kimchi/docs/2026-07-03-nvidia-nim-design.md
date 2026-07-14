@@ -56,9 +56,33 @@ Ported from `cc/providers/nvidia_nim/request_options.py` and `config/nim.py` def
   - `request_id`: nil
 - Apply the existing request `max_tokens` when present; otherwise fall back to the default.
 - Build and inject `extra_body` with:
-  - `chat_template_kwargs`: `{ "thinking": true, "enable_thinking": true }` when thinking is enabled, plus `reasoning_budget` set to `max_tokens`.
+  - `chat_template_kwargs`: always `{ "enable_thinking": true, "clear_thinking": false }`. No `thinking` flag or `reasoning_budget` is injected.
   - `top_k`, `min_p`, `repetition_penalty`, `min_tokens`, `chat_template`, `request_id`, `ignore_eos` when non-default.
 - Set `parallel_tool_calls` on the body directly.
+
+### Thinking / Reasoning Behavior
+NVIDIA NIM exposes reasoning through a simple `chat_template_kwargs.enable_thinking` toggle rather than OpenAI-style `reasoning_effort` levels or budget fields. The executor therefore:
+
+1. **Strips client reasoning directives** before the request reaches NIM:
+   - Top-level `reasoning_effort` is removed.
+   - Top-level `thinking` objects are removed.
+   - Any pre-existing `extra_body.chat_template_kwargs.thinking` or `extra_body.chat_template_kwargs.reasoning_budget` is removed.
+
+2. **Always injects the simple payload**:
+   ```json
+   {
+     "extra_body": {
+       "chat_template_kwargs": {
+         "enable_thinking": true,
+         "clear_thinking": false
+       }
+     }
+   }
+   ```
+
+3. **Does not gate on model suffixes**: unlike other providers, NIM does not use thinking suffixes such as `(high)` or `(8192)`. Reasoning is enabled for every request regardless of the model name.
+
+4. **Retry downgrades remain as a safety net**: if a user-provided `extra_body` still causes a 400 mentioning `reasoning_budget`, `chat_template`, or `reasoning_content`, the executor retries once after stripping the offending fields.
 
 ### Retry Downgrades
 Ported from `cc/providers/nvidia_nim/retry.py`:
