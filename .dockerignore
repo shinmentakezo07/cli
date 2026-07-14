@@ -41,3 +41,11 @@ _bmad-output/*
 # Web UI: node_modules and dist are rebuilt inside the Docker image
 webui/node_modules/*
 webui/dist/*
+
+# On-disk management UI override. The server prefers static/management.html
+# over the bundle embedded in the binary (see internal/api/server.go
+# serveManagementControlPanel), and the runtime auto-updater also writes here.
+# Exclude it so a stale host file can never shadow the webui/-built bundle that
+# Stage 1 of the Dockerfile bakes into the embedded asset. The container should
+# always serve the bundle it was built with.
+static/*

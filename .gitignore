@@ -52,3 +52,6 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+
+# Local nested/sibling repos and workspace scratch (not part of this project)
+cc/

@@ -19,7 +19,13 @@ RUN go mod download
 
 COPY . .
 
-# Bake the freshly built web UI into the embedded asset before compiling
+# Bake the freshly built web UI into the embedded asset before compiling.
+# This is the authoritative panel for the image: the server serves
+# internal/managementasset/management.html when no on-disk override exists.
+# .dockerignore excludes static/ so a stale host static/management.html can
+# never shadow this bundled copy, and the copied config.example.yaml sets
+# disable-auto-update-panel: true so the runtime auto-updater won't pull a
+# remote panel over the baked one.
 COPY --from=webui /webui/dist/index.html ./internal/managementasset/management.html
 
 ARG VERSION=dev

@@ -12,6 +12,7 @@ import { AiProvidersOpenAIEditPage } from '@/pages/AiProvidersOpenAIEditPage';
 import { AiProvidersOpenAIModelsPage } from '@/pages/AiProvidersOpenAIModelsPage';
 import { AiProvidersNvidiaEditLayout } from '@/pages/AiProvidersNvidiaEditLayout';
 import { AiProvidersNvidiaEditPage } from '@/pages/AiProvidersNvidiaEditPage';
+import { AiProvidersNvidiaModelsPage } from '@/pages/AiProvidersNvidiaModelsPage';
 import { AiProvidersVertexEditPage } from '@/pages/AiProvidersVertexEditPage';
 import { AuthFilesPage } from '@/pages/AuthFilesPage';
 import { AuthFilesOAuthExcludedEditPage } from '@/pages/AuthFilesOAuthExcludedEditPage';
@@ -72,6 +73,7 @@ const mainRoutes = [
     element: <AiProvidersNvidiaEditLayout />,
     children: [
       { index: true, element: <AiProvidersNvidiaEditPage /> },
+      { path: 'models', element: <AiProvidersNvidiaModelsPage /> },
     ],
   },
   {
@@ -79,6 +81,7 @@ const mainRoutes = [
     element: <AiProvidersNvidiaEditLayout />,
     children: [
       { index: true, element: <AiProvidersNvidiaEditPage /> },
+      { path: 'models', element: <AiProvidersNvidiaModelsPage /> },
     ],
   },
   { path: '/ai-providers', element: <AiProvidersPage /> },

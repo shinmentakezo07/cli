@@ -27,7 +27,9 @@ remote-management:
 
   # Disable automatic periodic background updates of the management panel from GitHub (default: false).
   # When enabled, the panel is only downloaded on first access if missing, and never auto-updated afterward.
-  # disable-auto-update-panel: false
+  # The Docker image bakes in the panel built from ./webui and keeps it authoritative — leave this true
+  # so the runtime auto-updater never overwrites the bundled panel with a remote release.
+  disable-auto-update-panel: true
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/shinmentakezo07/webui"
